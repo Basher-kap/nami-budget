@@ -3,14 +3,14 @@ import { View, Text, TextInput, Pressable, PanResponder, Alert } from 'react-nat
 import Svg, { Path, Polygon, G } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { Card, Btn, FormModal } from '../../components/ui';
-import { useStore, childrenOf, depthOf, BOX, WORLD } from '../../lib/store';
+import { useStore, childrenOf, depthOf, unallocated, BOX, WORLD } from '../../lib/store';
 import { C, money } from '../../lib/theme';
 
 const { W: BW, H: BH } = BOX;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 // A draggable node box. Drag moves it (lines follow); tap opens actions.
-function Box({ n, p, view, active, onPress, onMinus, onDrag, onDrop }) {
+function Box({ n, p, view, active, locked, onPress, onMinus, onDrag, onDrop }) {
   const L = useRef({});
   L.current = { n, p, view, onDrag, onDrop };
   const st = useRef({});
@@ -44,7 +44,7 @@ function Box({ n, p, view, active, onPress, onMinus, onDrag, onDrop }) {
       </Pressable>
       {!origin && (
         <Pressable onPress={onMinus} hitSlop={8} style={{ position: 'absolute', right: -10, bottom: -10, width: 28, height: 28,
-          borderRadius: 14, backgroundColor: C.red, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' }}>
+          borderRadius: 14, backgroundColor: C.red, opacity: locked ? 0.35 : 1, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff' }}>
           <Text style={{ color: '#fff', fontWeight: '900', fontSize: 18, marginTop: -2 }}>−</Text>
         </Pressable>
       )}
@@ -60,7 +60,7 @@ export default function Budget() {
   const [total, setTotal] = useState('');
   const [err, setErr] = useState('');
   const [sel, setSel] = useState(null);   // node id with action sheet open
-  const [form, setForm] = useState(null); // 'wallet' | 'allocate' | 'deposit' | 'expense'
+  const [form, setForm] = useState(null); // 'wallet' | 'deposit' | 'expense'
   const [drag, setDrag] = useState(null); // {id,x,y} while a node is being dragged
   const node = data.nodes.find((n) => n.id === sel);
 
@@ -132,6 +132,10 @@ export default function Budget() {
     );
   }
 
+  const hasKids = (id) => childrenOf(data.nodes, id).length > 0;
+  const noExpense = (n) => Alert.alert("Can't record an expense here", `"${n.name}" has sub-wallets. Record the expense in one of its sub-wallets instead.`);
+  const openExpense = (n) => { if (hasKids(n.id)) noExpense(n); else { setSel(n.id); setForm('expense'); } };
+
   const confirmDelete = () => {
     if (childrenOf(data.nodes, node.id).length) {
       Alert.alert("Can't delete yet", `"${node.name}" still has sub-wallets. Delete those first.`);
@@ -143,14 +147,17 @@ export default function Budget() {
     ]);
   };
 
+  const parentOf = node && node.parentId ? data.nodes.find((x) => x.id === node.parentId) : null;
   const forms = {
-    wallet: { title: 'Add Wallet', fields: [{ key: 'name', label: 'Wallet name' }, { key: 'amount', label: 'Amount from parent', numeric: true }],
+    wallet: { title: 'Add Wallet', sub: node ? `Available in ${node.name}: ${money(unallocated(data.nodes, node.id))}` : '',
+      fields: [{ key: 'name', label: 'Wallet name' }, { key: 'amount', label: 'Starting amount (taken from this node)', numeric: true }],
       submit: (x) => store.addWallet(sel, x.name, x.amount) },
-    allocate: { title: 'Allocate Money', fields: [{ key: 'amount', label: 'Amount from parent', numeric: true }],
-      submit: (x) => store.allocate(sel, x.amount) },
-    deposit: { title: node && !node.parentId ? 'Add to Total Budget' : 'Deposit Money', fields: [{ key: 'amount', label: 'Amount', numeric: true }],
+    deposit: { title: parentOf ? 'Deposit Money' : 'Add to Total Budget',
+      sub: parentOf ? `Taken from ${parentOf.name} · available: ${money(unallocated(data.nodes, parentOf.id))}` : 'Adds new money to your Total Budget',
+      fields: [{ key: 'amount', label: 'Amount', numeric: true }],
       submit: (x) => store.deposit(sel, x.amount) },
-    expense: { title: 'Expense', fields: [{ key: 'description', label: 'Expense Name (e.g. Dinner)' }, { key: 'amount', label: 'Expense Amount', numeric: true }],
+    expense: { title: 'Expense', sub: node ? `Wallet Name: ${node.name} · available: ${money(node.balance)}` : '',
+      fields: [{ key: 'description', label: 'Expense Name (e.g. Dinner)' }, { key: 'amount', label: 'Expense Amount', numeric: true }],
       submit: (x) => store.expense(sel, x.description, x.amount) },
   };
   const f = form && forms[form];
@@ -185,7 +192,7 @@ export default function Budget() {
           {data.nodes.map((n) => (
             <Box key={n.id} n={n} p={pos[n.id]} view={view} active={drag?.id === n.id}
               onPress={() => setSel(n.id)}
-              onMinus={() => { setSel(n.id); setForm('expense'); }}
+              locked={hasKids(n.id)} onMinus={() => openExpense(n)}
               onDrag={(id, x, y) => setDrag({ id, x, y })}
               onDrop={(id, x, y) => { store.moveNode(id, x, y); setDrag(null); }} />
           ))}
@@ -204,17 +211,18 @@ export default function Budget() {
         </Text>
       </View>
 
-      <FormModal visible={!!f} title={f?.title || ''} subtitle={node ? `Wallet Name: ${node.name}` : ''} fields={f?.fields || []}
+      <FormModal visible={!!f} title={f?.title || ''} subtitle={f?.sub || ''} fields={f?.fields || []}
         onSubmit={f?.submit || (() => ({ ok: true }))} onClose={() => { setForm(null); setSel(null); }} />
       {node && !form && (
         <Pressable onPress={() => setSel(null)} style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, backgroundColor: '#10304Eaa', justifyContent: 'flex-end' }}>
           <View style={{ backgroundColor: C.bg, padding: 18, borderTopLeftRadius: 24, borderTopRightRadius: 24, gap: 10, borderTopWidth: 3, borderColor: C.orange }}>
             <Text style={{ fontSize: 18, fontWeight: '900', color: C.navy }}>{node.name} · {money(node.balance)}</Text>
             <Btn title="＋ Add Wallet" onPress={() => setForm('wallet')} />
-            {node.parentId && <Btn title="Allocate from parent" kind="navy" onPress={() => setForm('allocate')} />}
-            <Btn title={node.parentId ? 'Deposit (new money)' : 'Add to Total Budget'} kind="navy" onPress={() => setForm('deposit')} />
-            {node.parentId && <Btn title="− Add Expense" kind="danger" onPress={() => setForm('expense')} />}
-            {node.parentId && <Btn title="Delete Wallet" kind="ghost" onPress={confirmDelete} />}
+            <Btn title={node.parentId ? 'Deposit Money' : 'Add to Total Budget'} kind="navy" onPress={() => setForm('deposit')} />
+            {node.parentId && <Btn title={hasKids(node.id) ? '− Add Expense (has sub-wallets)' : '− Add Expense'} kind="danger"
+              onPress={() => openExpense(node)} style={hasKids(node.id) ? { opacity: 0.4 } : null} />}
+            {node.parentId && <Btn title={childrenOf(data.nodes, node.id).length ? 'Delete Wallet (has sub-wallets)' : 'Delete Wallet'} kind="ghost" onPress={confirmDelete}
+              style={childrenOf(data.nodes, node.id).length ? { opacity: 0.4 } : null} />}
             <Btn title="Close" kind="ghost" onPress={() => setSel(null)} />
           </View>
         </Pressable>
