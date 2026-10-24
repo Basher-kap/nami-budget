@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ScrollView, View, Text, TextInput, Pressable, useWindowDimensions } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, TextInput, Pressable, PanResponder } from 'react-native';
 import Svg, { Path, Polygon } from 'react-native-svg';
 import { useRouter } from 'expo-router';
 import { Card, Btn, FormModal } from '../../components/ui';
@@ -50,10 +50,12 @@ function Box({ n, p, onPress, onMinus }) {
   );
 }
 
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const PAD = 28;
+
 export default function Budget() {
   const router = useRouter();
   const store = useStore();
-  const { width: screenW } = useWindowDimensions();
   const { data } = store;
   const origin = data.nodes.find((n) => !n.parentId);
   const [total, setTotal] = useState('');
@@ -61,6 +63,54 @@ export default function Budget() {
   const [sel, setSel] = useState(null);   // node id with action sheet open
   const [form, setForm] = useState(null); // 'wallet' | 'allocate' | 'deposit' | 'expense'
   const node = data.nodes.find((n) => n.id === sel);
+
+  // ---- pan / pinch-zoom canvas ----
+  const L = origin ? layout(data.nodes, origin.id) : null;
+  const cw = L ? L.w + PAD * 2 : 0;
+  const ch = L ? L.h + PAD * 2 : 0;
+  const vp = useRef({ w: 0, h: 0 });
+  const view = useRef({ s: 1, x: 0, y: 0 });
+  const [v, setV] = useState(view.current);
+  const set = (n) => { view.current = n; setV(n); };
+  const dims = useRef({ cw: 0, ch: 0 });
+  dims.current = { cw, ch };
+
+  const fit = () => {
+    const { w, h } = vp.current;
+    if (!w || !dims.current.cw) return;
+    const s = clamp(Math.min(w / dims.current.cw, h / dims.current.ch, 1), 0.3, 1);
+    set({ s, x: (w - dims.current.cw * s) / 2, y: Math.max(8, (h - dims.current.ch * s) / 2 * 0.4) });
+  };
+  const zoomBy = (f) => {
+    const { w, h } = vp.current; const c = view.current;
+    const s = clamp(c.s * f, 0.3, 2.5);
+    const wx = (w / 2 - c.x) / c.s, wy = (h / 2 - c.y) / c.s;
+    set({ s, x: w / 2 - wx * s, y: h / 2 - wy * s });
+  };
+  // Re-fit whenever the tree grows or shrinks
+  useEffect(() => { fit(); }, [data.nodes.length, cw, ch]);
+
+  const g = useRef({});
+  const pan = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (e, gs) =>
+      e.nativeEvent.touches.length >= 2 || Math.abs(gs.dx) > 6 || Math.abs(gs.dy) > 6,
+    onPanResponderGrant: () => { g.current = { start: { ...view.current }, base: { dx: 0, dy: 0 }, pinch: null }; },
+    onPanResponderMove: (e, gs) => {
+      const t = e.nativeEvent.touches;
+      const G = g.current;
+      if (t.length >= 2) {
+        const dist = Math.hypot(t[0].pageX - t[1].pageX, t[0].pageY - t[1].pageY);
+        if (!G.pinch) G.pinch = { dist, start: { ...view.current } };
+        const { w, h } = vp.current; const st = G.pinch.start;
+        const s = clamp(st.s * (dist / G.pinch.dist), 0.3, 2.5);
+        const wx = (w / 2 - st.x) / st.s, wy = (h / 2 - st.y) / st.s;
+        set({ s, x: w / 2 - wx * s, y: h / 2 - wy * s });
+      } else {
+        if (G.pinch) { G.pinch = null; G.start = { ...view.current }; G.base = { dx: gs.dx, dy: gs.dy }; }
+        set({ s: G.start.s, x: G.start.x + gs.dx - G.base.dx, y: G.start.y + gs.dy - G.base.dy });
+      }
+    },
+  })).current;
 
   if (!origin) {
     return (
@@ -77,11 +127,7 @@ export default function Budget() {
     );
   }
 
-  const { pos, w, h } = layout(data.nodes, origin.id);
-  const pad = 24;
-  const canvasW = Math.max(w + pad * 2, screenW);
-  const offX = (canvasW - w) / 2;
-  const canvasH = h + pad * 2;
+  const { pos, w, h } = L;
 
   const forms = {
     wallet: { title: 'Add Wallet', fields: [{ key: 'name', label: 'Wallet name' }, { key: 'amount', label: 'Amount from parent', numeric: true }],
@@ -100,36 +146,45 @@ export default function Budget() {
       <View style={{ padding: 16, paddingBottom: 0 }}>
         <Btn title="History Page" kind="navy" onPress={() => router.push('/history')} />
       </View>
-      <ScrollView>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          <View style={{ width: canvasW, height: canvasH }}>
-            <Svg width={canvasW} height={canvasH} style={{ position: 'absolute' }}>
-              {data.nodes.filter((n) => childrenOf(data.nodes, n.id).length).map((n) => {
-                const p = pos[n.id];
-                const px = offX + p.x + BW / 2, py = pad + p.y + BH, midY = py + GY / 2;
-                return childrenOf(data.nodes, n.id).map((c) => {
-                  const cx = offX + pos[c.id].x + BW / 2, cy = pad + pos[c.id].y;
-                  return (
-                    <React.Fragment key={c.id}>
-                      <Path d={`M${px} ${py} V${midY} H${cx} V${cy - 6}`} stroke={C.navy} strokeWidth={2} fill="none" />
-                      <Polygon points={`${cx - 5},${cy - 9} ${cx + 5},${cy - 9} ${cx},${cy}`} fill={C.navy} />
-                    </React.Fragment>
-                  );
-                });
-              })}
-            </Svg>
-            <View style={{ position: 'absolute', left: offX, top: pad, width: w, height: h }}>
-              {data.nodes.map((n) => (
-                <Box key={n.id} n={n} p={pos[n.id]} onPress={() => setSel(n.id)}
-                  onMinus={() => { setSel(n.id); setForm('expense'); }} />
-              ))}
-            </View>
+      <View style={{ flex: 1, overflow: 'hidden' }} {...pan.panHandlers}
+        onLayout={(e) => { vp.current = { w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height }; fit(); }}>
+        <View style={{ position: 'absolute', left: 0, top: 0, width: cw, height: ch, transformOrigin: 'top left',
+          transform: [{ translateX: v.x }, { translateY: v.y }, { scale: v.s }] }}>
+          <Svg width={cw} height={ch} style={{ position: 'absolute' }}>
+            {data.nodes.filter((n) => childrenOf(data.nodes, n.id).length).map((n) => {
+              const p = pos[n.id];
+              const px = PAD + p.x + BW / 2, py = PAD + p.y + BH, midY = py + GY / 2;
+              return childrenOf(data.nodes, n.id).map((c) => {
+                const cx = PAD + pos[c.id].x + BW / 2, cy = PAD + pos[c.id].y;
+                return (
+                  <React.Fragment key={c.id}>
+                    <Path d={`M${px} ${py} V${midY} H${cx} V${cy - 6}`} stroke={C.navy} strokeWidth={2} fill="none" />
+                    <Polygon points={`${cx - 5},${cy - 9} ${cx + 5},${cy - 9} ${cx},${cy}`} fill={C.navy} />
+                  </React.Fragment>
+                );
+              });
+            })}
+          </Svg>
+          <View style={{ position: 'absolute', left: PAD, top: PAD, width: w, height: h }}>
+            {data.nodes.map((n) => (
+              <Box key={n.id} n={n} p={pos[n.id]} onPress={() => setSel(n.id)}
+                onMinus={() => { setSel(n.id); setForm('expense'); }} />
+            ))}
           </View>
-        </ScrollView>
-        <Text style={{ color: C.muted, textAlign: 'center', fontSize: 12, marginBottom: 20 }}>
-          Tap a node for actions · tap − to record an expense
+        </View>
+
+        <View style={{ position: 'absolute', right: 12, bottom: 12, gap: 8 }}>
+          {[['＋', () => zoomBy(1.25)], ['－', () => zoomBy(0.8)], ['⤢', fit]].map(([t, fn]) => (
+            <Pressable key={t} onPress={fn} style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: C.navy,
+              alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: C.orange }}>
+              <Text style={{ color: C.gold, fontSize: 20, fontWeight: '900' }}>{t}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <Text style={{ position: 'absolute', left: 12, bottom: 12, color: C.muted, fontSize: 11 }}>
+          Drag to move · pinch or ＋/－ to zoom · ⤢ fit
         </Text>
-      </ScrollView>
+      </View>
 
       <FormModal visible={!!f} title={f?.title || ''} subtitle={node ? `Wallet Name: ${node.name}` : ''} fields={f?.fields || []}
         onSubmit={f?.submit || (() => ({ ok: true }))} onClose={() => { setForm(null); setSel(null); }} />
